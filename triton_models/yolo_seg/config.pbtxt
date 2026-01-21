@@ -1,0 +1,29 @@
+name: "yolo_seg"
+platform: "onnxruntime_onnx"
+max_batch_size: 32
+
+input [
+  {
+    name: "images"
+    data_type: TYPE_FP32
+    dims: [3, 640, 640]
+  }
+]
+
+output [
+  {
+    name: "output0"
+    data_type: TYPE_FP32
+    dims: [300, 38]
+  },
+  {
+    name: "output1"
+    data_type: TYPE_FP32
+    dims: [32, -1, -1]  
+  }
+]
+
+instance_group {
+  kind: KIND_CPU
+  count: 1
+}

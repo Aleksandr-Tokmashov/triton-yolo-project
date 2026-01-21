@@ -1,0 +1,39 @@
+services:
+  triton:
+    image: nvcr.io/nvidia/tritonserver:24.10-py3
+    command: tritonserver --model-repository=/models
+    ports:
+      - "8000:8000"  # HTTP
+      - "8001:8001"  # gRPC
+      - "8002:8002"  # Metrics
+    volumes:
+      - ./triton_models:/models  # Модели должны быть здесь
+    environment:
+      - CUDA_VISIBLE_DEVICES=-1  # Отключаем GPU
+    shm_size: '4gb'  # Разделяемая память
+    networks:
+      - app-network
+
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/v2/health/ready"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+  fastapi-app:
+    build: .
+    ports:
+      - "8080:8080"
+    volumes:
+      - .:/app
+    environment:
+      - TRITON_HTTP_URL=triton:8000
+      - TRITON_GRPC_URL=triton:8001
+    depends_on:
+      triton:
+        condition: service_healthy
+    networks:
+      - app-network
+
+networks:
+  app-network:
+    driver: bridge
