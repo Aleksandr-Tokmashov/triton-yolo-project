@@ -30,44 +30,72 @@ def preprocess_image(image_bytes: bytes) -> np.ndarray:
     img_resized = cv2.resize(image_np, (640, 640))
     img_normalized = img_resized.astype(np.float32) / 255.0
     img_chw = np.transpose(img_normalized, (2, 0, 1))
+    img_batch = np.expand_dims(img_chw, axis=0)
     
-    return img_chw
+    return img_batch
 
-def create_batch(images: List[bytes]) -> np.ndarray:
-    processed_images = []
-    for img_bytes in images:
-        img_processed = preprocess_image(img_bytes)
-        processed_images.append(img_processed)
+def postprocess_detections(output: np.ndarray) -> List[dict]:
+    detections = output[0] 
     
-    batch = np.stack(processed_images, axis=0) 
-    return batch
+    results = []
+    for det in detections:
+        conf = float(det[4])
+        if conf > 0.25:
+            x1, y1, x2, y2 = det[0], det[1], det[2], det[3]
+            class_id = int(det[5])
+            class_name = COCO_CLASSES[class_id] if class_id < len(COCO_CLASSES) else f"class_{class_id}"
+            
+            results.append({
+                "bbox": [float(x1), float(y1), float(x2), float(y2)],
+                "confidence": conf,
+                "class_id": class_id,
+                "class_name": class_name
+            })
+    
+    return results
 
-def postprocess_batch_yolo(output: np.ndarray, batch_size: int) -> List[List[dict]]:    
-    batch_results = []
-    for i in range(batch_size):
-        detections = output[i] 
-        image_results = []
+@app.post("/infer_ensemble")
+async def infer_ensemble(file: UploadFile = File(...)):
+    try:
+        contents = await file.read()
         
-        for det in detections:
-            conf = float(det[4])
-            if conf > 0.25:  
-                x1, y1, x2, y2 = det[0], det[1], det[2], det[3]
-                class_id = int(det[5])
-                class_name = COCO_CLASSES[class_id] if class_id < len(COCO_CLASSES) else f"class_{class_id}"
-                
-                image_results.append({
-                    "bbox": [float(x1), float(y1), float(x2), float(y2)],
-                    "confidence": conf,
-                    "class_id": class_id,
-                    "class_name": class_name
-                })
+        input_data = preprocess_image(contents)
         
-        batch_results.append(image_results)
-    
-    return batch_results
+        inputs = [httpclient.InferInput("images", input_data.shape, "FP32")]
+        inputs[0].set_data_from_numpy(input_data)
+        
+        outputs = [
+            httpclient.InferRequestedOutput("detections"),
+            httpclient.InferRequestedOutput("segmentation_output0"),
+            httpclient.InferRequestedOutput("segmentation_output1")
+        ]
+        
+        response = triton_client.infer(
+            model_name="yolo_ensemble",
+            inputs=inputs,
+            outputs=outputs
+        )
+        
+        detections_output = response.as_numpy("detections")
+        seg_output0 = response.as_numpy("segmentation_output0")
+        seg_output1 = response.as_numpy("segmentation_output1")
+        
+        detections = postprocess_detections(detections_output)
+        
+        return {
+            "detections": detections,
+            "segmentation": {
+                "output0_shape": seg_output0.shape,
+                "output1_shape": seg_output1.shape
+            },
+            "model": "yolo_ensemble"
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/infer_batch")
-async def infer_batch(model_name: str, images: List[UploadFile] = File(...)):
+@app.post("/infer_ensemble_batch")
+async def infer_ensemble_batch(images: List[UploadFile] = File(...)):
     if not images:
         raise HTTPException(status_code=400, detail="No images provided")
     
@@ -79,86 +107,49 @@ async def infer_batch(model_name: str, images: List[UploadFile] = File(...)):
         
         batch_size = len(images_bytes)
         
-        batch_data = create_batch(images_bytes)
+        processed_images = []
+        for img_bytes in images_bytes:
+            image = Image.open(io.BytesIO(img_bytes)).convert('RGB')
+            image_np = np.array(image)
+            
+            img_resized = cv2.resize(image_np, (640, 640))
+            img_normalized = img_resized.astype(np.float32) / 255.0
+            img_chw = np.transpose(img_normalized, (2, 0, 1))
+            processed_images.append(img_chw)
         
-        print(f"Batch shape: {batch_data.shape}")
+        batch_data = np.stack(processed_images, axis=0)
+        
+        print(f"Batch shape sent to ensemble: {batch_data.shape}")
         
         inputs = [httpclient.InferInput("images", batch_data.shape, "FP32")]
         inputs[0].set_data_from_numpy(batch_data)
         
-        if model_name == "yolo_det":
-            outputs = [httpclient.InferRequestedOutput("output0")]
-        elif model_name == "yolo_seg":
-            outputs = [
-                httpclient.InferRequestedOutput("output0"),
-                httpclient.InferRequestedOutput("output1")
-            ]
-        else:
-            raise HTTPException(status_code=400, detail="Unknown model name. Use 'yolo_det' or 'yolo_seg'")
+        outputs = [
+            httpclient.InferRequestedOutput("detections"),
+            httpclient.InferRequestedOutput("segmentation_output0"),
+            httpclient.InferRequestedOutput("segmentation_output1")
+        ]
         
         response = triton_client.infer(
-            model_name=model_name,
+            model_name="yolo_ensemble",
             inputs=inputs,
             outputs=outputs
         )
         
-        if model_name == "yolo_det":
-            output_data = response.as_numpy("output0")
-            print(f"Output shape: {output_data.shape}")
-            
-            batch_results = postprocess_batch_yolo(output_data, batch_size)
-            return {"results": batch_results, "batch_size": batch_size}
-            
-        elif model_name == "yolo_seg":
-            output0 = response.as_numpy("output0")
-            output1 = response.as_numpy("output1")
-            
-            print(f"Output0 shape: {output0.shape}")
-            print(f"Output1 shape: {output1.shape}")
-            
-            batch_results = postprocess_batch_yolo(output0, batch_size)
-            
-            return {
-                "results": batch_results,
-                "masks_shapes": output1.shape[1:],
-                "batch_size": batch_size
-            }
+        detections_output = response.as_numpy("detections")
+        seg_output0 = response.as_numpy("segmentation_output0")
+        seg_output1 = response.as_numpy("segmentation_output1")
         
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/infer")
-async def infer(model_name: str, file: UploadFile = File(...)):
-    try:
-        contents = await file.read()
-        input_data = preprocess_image(contents)
+        print(f"Ensemble detections output shape: {detections_output.shape}")
+        print(f"Ensemble seg_output0 shape: {seg_output0.shape}")
+        print(f"Ensemble seg_output1 shape: {seg_output1.shape}")
         
-        input_data = np.expand_dims(input_data, axis=0)
-        
-        inputs = [httpclient.InferInput("images", input_data.shape, "FP32")]
-        inputs[0].set_data_from_numpy(input_data)
-        
-        if model_name == "yolo_det":
-            outputs = [httpclient.InferRequestedOutput("output0")]
-        elif model_name == "yolo_seg":
-            outputs = [
-                httpclient.InferRequestedOutput("output0"),
-                httpclient.InferRequestedOutput("output1")
-            ]
-        else:
-            raise HTTPException(status_code=400, detail="Unknown model name. Use 'yolo_det' or 'yolo_seg'")
-        
-        response = triton_client.infer(
-            model_name=model_name,
-            inputs=inputs,
-            outputs=outputs
-        )
-        
-        if model_name == "yolo_det":
-            output_data = response.as_numpy("output0")[0]
+        batch_results = []
+        for i in range(batch_size):
             detections = []
+            dets = detections_output[i]
             
-            for det in output_data:
+            for det in dets:
                 conf = float(det[4])
                 if conf > 0.25:
                     x1, y1, x2, y2 = det[0], det[1], det[2], det[3]
@@ -172,31 +163,25 @@ async def infer(model_name: str, file: UploadFile = File(...)):
                         "class_name": class_name
                     })
             
-            return {"detections": detections}
-            
-        elif model_name == "yolo_seg":
-            output0 = response.as_numpy("output0")[0]
-            output1 = response.as_numpy("output1")[0]
-            
-            detections = []
-            for det in output0:
-                conf = float(det[4])
-                if conf > 0.25:
-                    x1, y1, x2, y2 = det[0], det[1], det[2], det[3]
-                    class_id = int(det[5])
-                    class_name = COCO_CLASSES[class_id] if class_id < len(COCO_CLASSES) else f"class_{class_id}"
-                    
-                    detections.append({
-                        "bbox": [float(x1), float(y1), float(x2), float(y2)],
-                        "confidence": conf,
-                        "class_id": class_id,
-                        "class_name": class_name
-                    })
-            
-            return {
+            batch_results.append({
+                "image_index": i,
                 "detections": detections,
-                "masks_shape": output1.shape
+                "segmentation_shapes": {
+                    "output0": seg_output0[i].shape if i < seg_output0.shape[0] else None,
+                    "output1": seg_output1[i].shape if i < seg_output1.shape[0] else None
+                }
+            })
+        
+        return {
+            "results": batch_results,
+            "batch_size": batch_size,
+            "model": "yolo_ensemble",
+            "output_shapes": {
+                "detections": detections_output.shape,
+                "segmentation_output0": seg_output0.shape,
+                "segmentation_output1": seg_output1.shape
             }
+        }
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

@@ -1,0 +1,62 @@
+name: "yolo_ensemble"
+platform: "ensemble"
+max_batch_size: 8
+
+input [
+  {
+    name: "images"
+    data_type: TYPE_FP32
+    dims: [3, 640, 640]
+  }
+]
+
+output [
+  {
+    name: "detections"
+    data_type: TYPE_FP32
+    dims: [300, 6]
+  },
+  {
+    name: "segmentation_output0"
+    data_type: TYPE_FP32
+    dims: [300, 38]
+  },
+  {
+    name: "segmentation_output1"
+    data_type: TYPE_FP32
+    dims: [32, -1, -1]
+  }
+]
+
+ensemble_scheduling {
+  step [
+    {
+      model_name: "yolo_det"
+      model_version: 1
+      input_map {
+        key: "images"
+        value: "images"
+      }
+      output_map {
+        key: "output0"
+        value: "detections"
+      }
+    },
+    {
+      model_name: "yolo_seg"
+      model_version: 1
+      input_map {
+        key: "images"
+        value: "images"
+      }
+      output_map {
+        key: "output0"
+        value: "segmentation_output0"
+      }
+      output_map {
+        key: "output1"
+        value: "segmentation_output1"
+      }
+    }
+  ]
+}
