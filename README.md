@@ -54,7 +54,7 @@
     docker-compose up --build
     ```
 
-3.  Шлюз FastAPI будет доступен по адресу: `http://localhost:8000`
+3.  Шлюз FastAPI будет доступен по адресу: `http://localhost:8080`
 
 ## Тестирование производительности
 
